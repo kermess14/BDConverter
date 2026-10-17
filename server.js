@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFile, exec } = require('child_process');
 const PDFDocument = require('pdfkit');
+const comicInfo = require('./comicinfo');
 let sharp;
 try { sharp = require('sharp'); } catch(e) { console.warn('Sharp module not found.'); }
 
@@ -547,10 +548,11 @@ app.post('/analyze', upload.single('file'), (req, res) => {
 
 // Route principale de conversion
 app.post('/convert', upload.array('files'), async (req, res) => {
-    const { dpi, maxWidth, colorMode, pageStart, pageEnd, format, compression, archiveCompression, imgFormat, requestId, rotation, splitDouble, readingDir, cropMargins, deskew, autoContrast, brightness, saturation } = req.body;
+    const { dpi, maxWidth, colorMode, pageStart, pageEnd, format, compression, archiveCompression, imgFormat, requestId, rotation, splitDouble, readingDir, cropMargins, deskew, autoContrast, brightness, saturation, addComicInfo } = req.body;
     const isOriginal = dpi === 'original';
     const rotAngle = rotation ? parseInt(rotation) : 0;
     const maxW = maxWidth ? parseInt(maxWidth) : null;
+    const addComicInfoVal = addComicInfo === 'true' || addComicInfo === true || addComicInfo === '1';
     // Advanced retouching options (opt-in, render-mode only - ignored when isOriginal)
     const cropMarginsVal = (!isOriginal && cropMargins) ? cropMargins : '';
     const deskewVal = (!isOriginal && (deskew === 'true' || deskew === true || deskew === '1'));
@@ -732,6 +734,12 @@ app.post('/convert', upload.array('files'), async (req, res) => {
 
             const safeTempArchiveName = `archive_${Date.now()}_${Math.random().toString(36).substring(7)}.${safeFormat === 'rar4' ? 'cbr' : safeFormat}`;
             const tempOutputPath = path.join(TEMP_DIR, safeTempArchiveName);
+
+            // ComicInfo.xml (series / number / title) for comic servers such as Kavita or Komga
+            if (addComicInfoVal && !['pdf', 'folder'].includes(safeFormat)) {
+                const ci = comicInfo.writeComicInfo(tempDir, baseName);
+                if (ci) logInfo(`[COMICINFO] "${baseName}" -> series "${ci.series}"${ci.number ? `, #${ci.number}` : ''}`);
+            }
 
             if (safeFormat === 'folder') {
                 // Folder mode: skip archiving
@@ -1412,6 +1420,13 @@ app.post('/convert', upload.array('files'), async (req, res) => {
             const safeTempArchiveName = `archive_${Date.now()}_${Math.random().toString(36).substring(7)}.${safeFormat === 'rar4' ? 'cbr' : safeFormat}`;
             const tempOutputPath = path.join(TEMP_DIR, safeTempArchiveName);
 
+            // ComicInfo.xml (series / number / title) for comic servers such as Kavita or Komga
+            if (addComicInfoVal && !['pdf', 'folder'].includes(safeFormat)) {
+                const ciSource = path.posix.join(path.posix.dirname(file.originalname.replace(/\\/g, '/')), fileName);
+                const ci = comicInfo.writeComicInfo(tempDir, ciSource);
+                if (ci) logInfo(`[COMICINFO] "${file.originalname}" -> series "${ci.series}"${ci.number ? `, #${ci.number}` : ''}`);
+            }
+
             if (safeFormat === 'folder') {
             } else if (safeFormat === 'pdf') {
                 await new Promise((resolve, reject) => {
@@ -1544,7 +1559,10 @@ app.post('/convert', upload.array('files'), async (req, res) => {
             const name = file.originalname.replace(/\\/g, '/');
             const parts = name.split('/');
             
-            if (parts.length > 1) {
+            // Only images are grouped by folder (merged into one archive per folder).
+            // Documents (PDF, CBZ, CBR...) found inside a dropped folder are converted
+            // individually, exactly like documents dropped at the root.
+            if (parts.length > 1 && isImageFile(file)) {
                 // Inside a folder
                 const rootDir = parts[0];
                 if (!groups[rootDir]) groups[rootDir] = [];
@@ -1625,6 +1643,10 @@ app.post('/convert', upload.array('files'), async (req, res) => {
     }
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
     logInfo(`BDConverter server started on http://localhost:${port} | Log level: ${LOG_LEVEL.toUpperCase()} | Theme: ${activeTheme}`);
 });
+
+// No time limit for receiving a request: Node closes requests that take more than 5 minutes
+// (requestTimeout default since Node 18), which cut big uploads on slow networks.
+server.requestTimeout = 0;
